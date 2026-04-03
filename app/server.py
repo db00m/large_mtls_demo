@@ -26,9 +26,44 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self._log_request(status_code)
 
+    def _send_html(self, status_code, body):
+        encoded = body.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+        self._log_request(status_code)
+
     def do_GET(self):
         if self.path == "/healthz":
             self._send_json(200, {"service": "app", "status": "ok"})
+            return
+
+        if self.path == "/":
+            self._send_html(
+                200,
+                """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Large mTLS Demo</title>
+  </head>
+  <body>
+    <main>
+      <h1>Large mTLS Demo</h1>
+      <p>This app is reachable through the HTTPS load balancer.</p>
+      <p>Current phase: local TLS termination is active, but client certificate enrollment is not implemented yet.</p>
+      <ul>
+        <li><a href="/whoami">Inspect forwarded headers</a></li>
+        <li><code>POST /enroll</code> is routed to the signer service through the load balancer.</li>
+      </ul>
+    </main>
+  </body>
+</html>
+""",
+            )
             return
 
         if self.path == "/whoami":
@@ -46,14 +81,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_json(200, payload)
             return
 
-        self._send_json(
-            200,
-            {
-                "service": "app",
-                "message": "app container reachable through load balancer",
-                "path": self.path,
-            },
-        )
+        self._send_json(404, {"service": "app", "error": "not found", "path": self.path})
 
     def log_message(self, format, *args):
         return

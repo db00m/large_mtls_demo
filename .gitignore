@@ -33,9 +33,9 @@ docker-compose.override.yml
 *.srl
 *.cnf.local
 secrets/
-certs/
 ca/
 private/
+certs/
 
 # Logs and runtime output
 *.log

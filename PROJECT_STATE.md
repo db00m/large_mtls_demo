@@ -64,8 +64,8 @@ Key points already captured there:
 
 ## Current Implementation
 
-The repository currently contains a minimal Compose scaffold that validates
-networking and routing before adding real TLS and certificate handling.
+The repository now contains a Compose scaffold with local HTTPS termination at
+the load balancer using mkcert-generated development certificates.
 
 Implemented files:
 
@@ -81,19 +81,23 @@ Implemented files:
 What works today:
 
 - `docker compose` starts three containers
-- only the LB is exposed on `localhost:8080`
+- only the LB is exposed on host ports
+- `http://localhost:8080` is available for LB health checks and HTTP-to-HTTPS
+  redirects
+- `https://localhost:8443` terminates TLS at the LB with local certs mounted
+  from `./certs`
 - the LB routes:
   - `/` and `/whoami` to `app`
   - `/enroll` and `/signer/*` to `signer`
+- the app serves a minimal HTML landing page at `/`
 - the LB injects placeholder trusted-proxy headers
 - all three services emit request logs to stdout
 - integration tests verify the baseline network behavior
 
 What does **not** exist yet:
 
-- HTTPS on the LB
 - client certificate validation
-- Firefox enrollment trigger page
+- Firefox enrollment trigger page/header behavior
 - real enrollment token flow
 - real CSR parsing and signing
 - user/session model in the application
@@ -104,19 +108,21 @@ What does **not** exist yet:
 Start the stack:
 
 ```bash
+./scripts/generate-local-certs.sh
 docker compose up --build -d
 ```
 
 Useful endpoints:
 
-- `http://127.0.0.1:8080/`
-- `http://127.0.0.1:8080/whoami`
+- `https://127.0.0.1:8443/`
+- `https://127.0.0.1:8443/whoami`
+- `http://127.0.0.1:8080/` (redirects to HTTPS except health)
 - `http://127.0.0.1:8080/lb/healthz`
 
 Example signer request:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/enroll \
+curl -X POST https://127.0.0.1:8443/enroll \
   -H 'Authorization: Bearer test-token' \
   -H 'Content-Type: application/pkcs10' \
   --data-binary $'-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n'
@@ -155,8 +161,10 @@ python -m unittest tests/test_compose_stack.py
 The test suite currently verifies:
 
 - LB health endpoint
-- routing to the app
-- routing to the signer enrollment endpoint
+- HTTP redirect behavior at the LB
+- delivery of the app HTML page over HTTPS
+- routing to the app diagnostics endpoint over HTTPS
+- routing to the signer enrollment endpoint over HTTPS
 - backend services are not reachable directly from host ports
 - LB can reach backend services on the internal Compose network
 
@@ -181,15 +189,13 @@ repo code issue.
 
 The next implementation milestones should be:
 
-1. Add real HTTPS termination to the LB.
-2. Add a minimal HTML page from the app instead of JSON-only responses.
-3. Emit the Firefox `Client-Cert-Enrollment` header from a page/response that
+1. Emit the Firefox `Client-Cert-Enrollment` header from a page/response that
    matches the documented constraints.
-4. Add enrollment token issuance in the app.
-5. Implement CSR acceptance and certificate signing in the signer.
-6. Add LB forwarding of real certificate-derived identity headers.
-7. Add application-side user lookup and authorization behavior.
-8. Add demo cases for:
+2. Add enrollment token issuance in the app.
+3. Implement CSR acceptance and certificate signing in the signer.
+4. Add LB forwarding of real certificate-derived identity headers.
+5. Add application-side user lookup and authorization behavior.
+6. Add demo cases for:
    - valid cert + active user
    - valid cert + disabled user
    - invalid/untrusted cert
