@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and local config
+.env
+.env.*
+*.local
+docker-compose.override.yml
+
+# TLS, PKI, and secrets
+*.key
+*.pem
+*.crt
+*.csr
+*.der
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.srl
+*.cnf.local
+secrets/
+certs/
+ca/
+private/
+
+# Logs and runtime output
+*.log
+logs/
+tmp/
+.tmp/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
