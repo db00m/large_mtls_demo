@@ -4,7 +4,7 @@
 The currently implemented trigger is a response header:
 
 ```http
-Client-Cert-Enrollment: https://example.com/enroll; token="opaque-one-time-token"; https://example.com/enroll/complete
+Client-Cert-Enrollment: https://example.com:8443/enroll; token="opaque-one-time-token"; https://example.com:9443/enroll/complete
 ```
 
 Header fields are currently interpreted as:
@@ -12,6 +12,12 @@ Header fields are currently interpreted as:
 - the enrollment CSR endpoint URL
 - an optional `token="..."`
 - a bare completion URL for the browser to load after enrollment finishes
+
+For this demo, enrollment happens on the standard HTTPS listener and the
+completion page is loaded through the separate mTLS listener:
+
+- `8443`: enrollment bootstrap and CSR submission
+- `9443`: certificate-required browsing after enrollment
 
 Current enforced constraints:
 

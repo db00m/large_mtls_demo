@@ -55,28 +55,27 @@ def run_command(*args):
     )
 
 
-def generate_demo_csr():
+def create_client_key_and_csr(output_dir, common_name="firefox-demo-client"):
     if not openssl_available():
         raise AssertionError("openssl is required to generate a demo CSR for enrollment tests")
-    with tempfile.TemporaryDirectory() as tmp_dir_name:
-        tmp_dir = Path(tmp_dir_name)
-        key_file = tmp_dir / "client.key"
-        csr_file = tmp_dir / "client.csr"
-        run_command(
-            "openssl",
-            "req",
-            "-new",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(key_file),
-            "-out",
-            str(csr_file),
-            "-subj",
-            "/CN=firefox-demo-client",
-        )
-        return csr_file.read_bytes()
+    filename_prefix = common_name.replace("/", "-")
+    key_file = output_dir / f"{filename_prefix}.key"
+    csr_file = output_dir / f"{filename_prefix}.csr"
+    run_command(
+        "openssl",
+        "req",
+        "-new",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(key_file),
+        "-out",
+        str(csr_file),
+        "-subj",
+        f"/CN={common_name}",
+    )
+    return key_file, csr_file.read_bytes()
 
 
 def ensure_local_tls_material():
@@ -145,6 +144,12 @@ def https_context():
     return ssl._create_unverified_context()
 
 
+def client_https_context(cert_file, key_file):
+    context = https_context()
+    context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+    return context
+
+
 def get_response(url, method="GET", body=None, headers=None, context=None):
     request = urllib.request.Request(url, method=method, data=body, headers=headers or {})
     return urllib.request.urlopen(request, timeout=2, context=context)
@@ -164,10 +169,27 @@ class ComposeStackTests(unittest.TestCase):
         run_compose("down", "-v", "--remove-orphans", check=False)
         run_compose("up", "--build", "-d")
         cls._wait_for_stack()
+        cls._client_tmp_dir = tempfile.TemporaryDirectory()
+        client_dir = Path(cls._client_tmp_dir.name)
+        cls._client_key_file, client_csr = create_client_key_and_csr(client_dir)
+        enrollment_payload = get_json(
+            "https://127.0.0.1:8443/enroll",
+            method="POST",
+            body=client_csr,
+            headers={
+                "Authorization": "Bearer demo-enrollment-token",
+                "Content-Type": "application/pkcs10",
+            },
+            context=cls._https_context,
+        )
+        cls._client_cert_file = client_dir / "client.pem"
+        cls._client_cert_file.write_text(enrollment_payload["certificate"], encoding="utf-8")
+        cls._mtls_context = client_https_context(cls._client_cert_file, cls._client_key_file)
 
     @classmethod
     def tearDownClass(cls):
         run_compose("down", "-v", "--remove-orphans", check=False)
+        cls._client_tmp_dir.cleanup()
         maybe_cleanup_generated_tls_material(cls._generated_tls_material)
 
     @classmethod
@@ -214,7 +236,7 @@ class ComposeStackTests(unittest.TestCase):
         self.assertEqual(
             enrollment_header,
             'https://localhost:8443/enroll; token="demo-enrollment-token"; '
-            'redirect="https://localhost:8443/enroll/complete"',
+            'https://localhost:9443/enroll/complete',
         )
         self.assertIn("Client Certificate Enrollment", body)
         self.assertIn("Continue to the completion page", body)
@@ -227,7 +249,8 @@ class ComposeStackTests(unittest.TestCase):
         self.assertEqual(payload["headers"]["x_forwarded_host"], "127.0.0.1:8443")
 
     def test_signer_enroll_route_through_lb_over_https(self):
-        body = generate_demo_csr()
+        client_dir = Path(self._client_tmp_dir.name)
+        _, body = create_client_key_and_csr(client_dir, common_name="firefox-demo-client-second")
         payload = get_json(
             "https://127.0.0.1:8443/enroll",
             method="POST",
@@ -244,18 +267,39 @@ class ComposeStackTests(unittest.TestCase):
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
         self.assertTrue(payload["csr_received"])
         self.assertEqual(payload["encoding"], "pem")
-        self.assertEqual(payload["redirect_url"], "https://127.0.0.1:8443/enroll/complete")
+        self.assertEqual(payload["redirect_url"], "https://localhost:9443/enroll/complete")
         self.assertIn("BEGIN CERTIFICATE", payload["certificate"])
 
-    def test_enrollment_completion_page_is_reachable(self):
+    def test_mtls_port_rejects_requests_without_client_certificate(self):
+        try:
+            get_response("https://localhost:9443/enroll/complete", context=self._https_context)
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 400)
+            exc.close()
+        except (urllib.error.URLError, ssl.SSLError, ConnectionResetError, TimeoutError):
+            pass
+        else:
+            self.fail("expected the mTLS port to reject requests without a client certificate")
+
+    def test_enrollment_completion_page_is_reachable_over_mtls(self):
         with get_response(
-            "https://localhost:8443/enroll/complete?state=installed",
-            context=self._https_context,
+            "https://localhost:9443/enroll/complete?state=installed",
+            context=self._mtls_context,
         ) as response:
             self.assertEqual(response.headers.get_content_type(), "text/html")
             body = response.read().decode("utf-8")
         self.assertIn("Enrollment Completion", body)
-        self.assertIn("real redirect target", body)
+        self.assertIn("mTLS port", body)
+
+    def test_mtls_whoami_shows_verified_client_identity(self):
+        payload = get_json("https://localhost:9443/whoami", context=self._mtls_context)
+        self.assertEqual(payload["service"], "app")
+        self.assertEqual(payload["headers"]["x_demo_trusted_proxy"], "lb")
+        self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
+        self.assertEqual(payload["headers"]["x_forwarded_host"], "localhost:9443")
+        self.assertEqual(payload["headers"]["x_client_verify"], "SUCCESS")
+        self.assertIn("CN=firefox-demo-client", payload["headers"]["x_client_subject"])
+        self.assertIn("CN=large-mtls-demo-client-ca", payload["headers"]["x_client_issuer"])
 
     def test_backend_services_are_not_published_to_host(self):
         with self.assertRaises((urllib.error.URLError, ConnectionError, TimeoutError)):

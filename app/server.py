@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 class AppHandler(BaseHTTPRequestHandler):
     ENROLLMENT_TOKEN = "demo-enrollment-token"
-    ENROLLMENT_COMPLETE_URL = "https://localhost:8443/enroll/complete"
+    ENROLLMENT_COMPLETE_URL = "https://localhost:9443/enroll/complete"
 
     def _log_request(self, status_code):
         if urlsplit(self.path).path == "/healthz":
@@ -101,12 +101,13 @@ class AppHandler(BaseHTTPRequestHandler):
     <main>
       <h1>Large mTLS Demo</h1>
       <p>This app is reachable through the HTTPS load balancer.</p>
-      <p>Current phase: Firefox enrollment scaffolding is active and the signer now returns a demo client certificate.</p>
+      <p>Current phase: Firefox enrollment scaffolding is active and the mTLS edge now requires a verified client certificate on port 9443.</p>
       <p><a href="/enroll/start">Enroll Client Certificate</a></p>
       <ul>
         <li><a href="/enroll/start">Trigger Firefox auto enrollment</a></li>
-        <li><a href="/enroll/complete">Enrollment completion page</a></li>
+        <li><a href="https://localhost:9443/enroll/complete">Enrollment completion page on the mTLS port</a></li>
         <li><a href="/whoami">Inspect forwarded headers</a></li>
+        <li><a href="https://localhost:9443/whoami">Inspect verified client identity on the mTLS port</a></li>
         <li><code>POST /enroll</code> is routed to the signer service through the load balancer.</li>
       </ul>
     </main>
@@ -133,9 +134,10 @@ class AppHandler(BaseHTTPRequestHandler):
   <body>
     <main>
       <h1>Enrollment Completion</h1>
-      <p>This is the real redirect target for the enrollment flow.</p>
-      <p>If Firefox accepted the certificate response, the browser should now have a client certificate available for later mTLS handshakes.</p>
+      <p>This is the real redirect target for the enrollment flow on the mTLS port.</p>
+      <p>If this page loaded successfully, the client certificate was presented and verified at the load balancer.</p>
       <p><a href="/">Return to the demo home page</a></p>
+      <p><a href="/whoami">Inspect the verified client identity headers</a></p>
     </main>
   </body>
 </html>
@@ -153,6 +155,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     "x_forwarded_for": self.headers.get("X-Forwarded-For"),
                     "x_forwarded_proto": self.headers.get("X-Forwarded-Proto"),
                     "x_forwarded_host": self.headers.get("X-Forwarded-Host"),
+                    "x_client_verify": self.headers.get("X-Client-Verify"),
+                    "x_client_subject": self.headers.get("X-Client-Subject"),
+                    "x_client_issuer": self.headers.get("X-Client-Issuer"),
                 },
             }
             self._send_json(200, payload)

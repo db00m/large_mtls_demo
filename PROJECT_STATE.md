@@ -86,6 +86,8 @@ What works today:
   redirects
 - `https://localhost:8443` terminates TLS at the LB with local certs mounted
   from `./certs`
+- `https://localhost:9443` terminates TLS at the LB and requires a verified
+  client certificate signed by the demo client CA
 - the LB routes:
   - `/` and `/whoami` to `app`
   - `/enroll/start` and `/enroll/complete` to `app`
@@ -93,19 +95,22 @@ What works today:
 - the app serves a minimal HTML landing page at `/`
 - the app exposes an enroll button and a top-level HTTPS enrollment trigger page
 - the enrollment trigger page emits the Firefox
-  `Client-Cert-Enrollment` header with a dummy token and a real completion URL
+  `Client-Cert-Enrollment` header with a dummy token, a CSR endpoint on `8443`,
+  and a completion URL on the mTLS listener at `9443`
 - the signer accepts a real PEM CSR at `POST /enroll` and returns a PEM client
   certificate in JSON
-- the LB injects placeholder trusted-proxy headers
+- the LB enforces client certificate verification on `9443`
+- the LB injects trusted-proxy headers and forwards certificate verification
+  metadata to the app on the mTLS listener
 - all three services emit request logs to stdout
 - integration tests verify the baseline network behavior
 
 What does **not** exist yet:
 
-- client certificate validation
 - real enrollment token flow
+- certificate fingerprint forwarding
 - user/session model in the application
-- certificate-derived identity forwarding
+- application-side authorization decisions based on the verified certificate
 
 ## How To Run
 
@@ -120,6 +125,8 @@ Useful endpoints:
 
 - `https://127.0.0.1:8443/`
 - `https://127.0.0.1:8443/whoami`
+- `https://localhost:9443/enroll/complete`
+- `https://localhost:9443/whoami`
 - `http://127.0.0.1:8080/` (redirects to HTTPS except health)
 - `http://127.0.0.1:8080/lb/healthz`
 
@@ -170,7 +177,9 @@ The test suite currently verifies:
 - delivery of the Firefox enrollment trigger page and header over HTTPS
 - routing to the app diagnostics endpoint over HTTPS
 - routing to the signer enrollment endpoint over HTTPS
-- delivery of the enrollment completion page over HTTPS
+- rejection of unauthenticated traffic on the mTLS listener
+- delivery of the enrollment completion page over mTLS
+- forwarding of verified client identity headers over mTLS
 - backend services are not reachable directly from host ports
 - LB can reach backend services on the internal Compose network
 
@@ -196,10 +205,9 @@ repo code issue.
 The next implementation milestones should be:
 
 1. Add enrollment token issuance and validation beyond the current dummy token.
-2. Add LB client certificate validation against the signer CA.
-3. Add LB forwarding of real certificate-derived identity headers.
-4. Add application-side user lookup and authorization behavior.
-5. Add demo cases for:
+2. Add certificate fingerprint and full certificate forwarding where needed.
+3. Add application-side user lookup and authorization behavior.
+4. Add demo cases for:
    - valid cert + active user
    - valid cert + disabled user
    - invalid/untrusted cert

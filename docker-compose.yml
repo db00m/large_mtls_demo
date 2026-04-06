@@ -9,9 +9,11 @@ services:
     ports:
       - "8080:8080"
       - "8443:8443"
+      - "9443:9443"
     volumes:
       - ./lb/nginx.conf:/etc/nginx/nginx.conf:ro,Z
       - ./certs:/etc/nginx/certs:ro,Z
+      - signer_state:/etc/nginx/client-ca:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/lb/healthz || exit 1"]
       interval: 5s
@@ -38,6 +40,8 @@ services:
       context: ./signer
     expose:
       - "8000"
+    volumes:
+      - signer_state:/srv/signer/state
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
       interval: 5s
@@ -49,3 +53,6 @@ services:
 networks:
   demo_net:
     driver: bridge
+
+volumes:
+  signer_state:

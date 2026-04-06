@@ -79,6 +79,7 @@ def sign_csr(csr_pem):
 
 class SignerHandler(BaseHTTPRequestHandler):
     ENROLLMENT_TOKEN = "Bearer demo-enrollment-token"
+    ENROLLMENT_COMPLETE_URL = "https://localhost:9443/enroll/complete"
 
     def _log_request(self, status_code):
         if urlsplit(self.path).path == "/healthz":
@@ -191,7 +192,7 @@ class SignerHandler(BaseHTTPRequestHandler):
             "csr_received": True,
             "certificate": certificate_pem,
             "encoding": "pem",
-            "redirect_url": f"{self._external_base_url()}/enroll/complete",
+            "redirect_url": self.ENROLLMENT_COMPLETE_URL,
         }
         self._send_json(200, payload)
 
