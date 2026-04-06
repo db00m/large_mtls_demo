@@ -1,3 +1,4 @@
+import http.cookiejar
 import json
 import re
 import shutil
@@ -7,6 +8,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -175,6 +177,39 @@ def get_json(url, method="GET", body=None, headers=None, context=None):
         return json.loads(response.read().decode("utf-8"))
 
 
+def opener_with_context(context):
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context),
+        urllib.request.HTTPCookieProcessor(cookie_jar),
+    )
+    return opener
+
+
+def open_with_opener(opener, url, method="GET", body=None, headers=None):
+    request = urllib.request.Request(url, method=method, data=body, headers=headers or {})
+    return opener.open(request, timeout=2)
+
+
+def get_json_with_opener(opener, url, method="GET", body=None, headers=None):
+    with open_with_opener(opener, url, method=method, body=body, headers=headers) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def login_as(user_id, context, next_path="/protected"):
+    opener = opener_with_context(context)
+    body = urllib.parse.urlencode({"user_id": user_id, "next": next_path}).encode("utf-8")
+    with open_with_opener(
+        opener,
+        "https://localhost:8443/login",
+        method="POST",
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    ) as response:
+        page = response.read().decode("utf-8")
+    return opener, page
+
+
 def parse_enrollment_token(enrollment_header):
     match = re.fullmatch(
         r'https://localhost:8443/enroll; token="([^"]+)"; https://localhost:9443/enroll/complete',
@@ -185,11 +220,8 @@ def parse_enrollment_token(enrollment_header):
     return match.group(1)
 
 
-def start_enrollment(user_id, context):
-    with get_response(
-        f"https://localhost:8443/enroll/start?user={user_id}",
-        context=context,
-    ) as response:
+def start_enrollment(opener):
+    with open_with_opener(opener, "https://localhost:8443/enroll/start") as response:
         enrollment_header = response.headers.get("Client-Cert-Enrollment")
         body = response.read().decode("utf-8")
     return {
@@ -210,7 +242,8 @@ class ComposeStackTests(unittest.TestCase):
         cls._wait_for_stack()
         cls._client_tmp_dir = tempfile.TemporaryDirectory()
         client_dir = Path(cls._client_tmp_dir.name)
-        enrollment = start_enrollment("user-alice", cls._https_context)
+        alice_opener, _ = login_as("user-alice", cls._https_context, next_path="/protected")
+        enrollment = start_enrollment(alice_opener)
         cls._client_key_file, client_csr = create_client_key_and_csr(
             client_dir,
             common_name="csr-tries-to-be-mallory",
@@ -270,17 +303,42 @@ class ComposeStackTests(unittest.TestCase):
             self.assertEqual(response.headers.get_content_type(), "text/html")
             body = response.read().decode("utf-8")
         self.assertIn("Large mTLS Demo", body)
-        self.assertIn("Demo Users", body)
+        self.assertIn("not logged in", body)
+        self.assertIn("login page", body)
+        self.assertIn("mTLS protected page", body)
+
+    def test_login_page_lists_demo_users(self):
+        with get_response("https://localhost:8443/login", context=self._https_context) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/html")
+            body = response.read().decode("utf-8")
+        self.assertIn("Login", body)
         self.assertIn("Alice Admin", body)
         self.assertIn("Bob Builder", body)
         self.assertIn("Eve Example", body)
-        self.assertIn('href="/enroll/start?user=user-alice"', body)
 
-    def test_enrollment_trigger_page_emits_firefox_header(self):
-        enrollment = start_enrollment("user-bob", self._https_context)
+    def test_standard_tls_protected_page_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            get_response("https://localhost:8443/protected", context=self._https_context)
+        self.assertEqual(context.exception.code, 401)
+        body = context.exception.read().decode("utf-8")
+        context.exception.close()
+        self.assertIn("Protected Standard TLS Page", body)
+        self.assertIn("requires a standard login session", body)
+
+    def test_standard_tls_protected_page_is_available_after_login(self):
+        opener, page = login_as("user-bob", self._https_context, next_path="/protected")
+        self.assertIn("Protected Standard TLS Page", page)
+        self.assertIn("Bob Builder", page)
+        payload = get_json_with_opener(opener, "https://localhost:8443/whoami")
+        self.assertEqual(payload["session_user"]["id"], "user-bob")
+        self.assertIsNone(payload["certificate_user"])
+
+    def test_enrollment_trigger_page_emits_firefox_header_for_logged_in_user(self):
+        opener, _ = login_as("user-bob", self._https_context, next_path="/protected")
+        enrollment = start_enrollment(opener)
         self.assertTrue(enrollment["token"])
         self.assertIn("Bob Builder", enrollment["body"])
-        self.assertIn("user-bob", enrollment["body"])
+        self.assertIn("logged-in user", enrollment["body"])
         self.assertIn("Client Certificate Enrollment", enrollment["body"])
         self.assertIn("name", enrollment["body"])
 
@@ -291,11 +349,13 @@ class ComposeStackTests(unittest.TestCase):
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
         self.assertEqual(payload["headers"]["x_forwarded_host"], "127.0.0.1:8443")
         self.assertIsNone(payload["headers"]["x_client_cert_user_id"])
-        self.assertIsNone(payload["user"])
+        self.assertIsNone(payload["session_user"])
+        self.assertIsNone(payload["certificate_user"])
 
     def test_signer_enroll_route_through_lb_over_https(self):
         client_dir = Path(self._client_tmp_dir.name)
-        enrollment = start_enrollment("user-bob", self._https_context)
+        opener, _ = login_as("user-bob", self._https_context, next_path="/protected")
+        enrollment = start_enrollment(opener)
         _, body = create_client_key_and_csr(client_dir, common_name="mallory-requested-name")
         payload = get_json(
             "https://127.0.0.1:8443/enroll",
@@ -331,6 +391,15 @@ class ComposeStackTests(unittest.TestCase):
         self.assertIn("CN=Alice Admin", self._client_cert_subject)
         self.assertNotIn("csr-tries-to-be-mallory", self._client_cert_subject)
 
+    def test_mtls_protected_page_on_standard_tls_port_requires_certificate(self):
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            get_response("https://localhost:8443/protected/mtls", context=self._https_context)
+        self.assertEqual(context.exception.code, 403)
+        body = context.exception.read().decode("utf-8")
+        context.exception.close()
+        self.assertIn("Protected mTLS Page", body)
+        self.assertIn("requires a verified client certificate", body)
+
     def test_mtls_port_rejects_requests_without_client_certificate(self):
         try:
             get_response("https://localhost:9443/enroll/complete", context=self._https_context)
@@ -353,6 +422,15 @@ class ComposeStackTests(unittest.TestCase):
         self.assertIn("Alice Admin", body)
         self.assertIn("user-alice", body)
 
+    def test_mtls_protected_page_shows_connected_user(self):
+        with get_response("https://localhost:9443/protected/mtls", context=self._mtls_context) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/html")
+            body = response.read().decode("utf-8")
+        self.assertIn("Protected mTLS Page", body)
+        self.assertIn("Alice Admin", body)
+        self.assertIn("user-alice", body)
+        self.assertIn("protected by mutual TLS", body)
+
     def test_mtls_whoami_shows_verified_client_identity(self):
         payload = get_json("https://localhost:9443/whoami", context=self._mtls_context)
         self.assertEqual(payload["service"], "app")
@@ -364,15 +442,14 @@ class ComposeStackTests(unittest.TestCase):
         self.assertIn("serialNumber=user-alice", payload["headers"]["x_client_subject"])
         self.assertIn("CN=Alice Admin", payload["headers"]["x_client_subject"])
         self.assertIn("CN=large-mtls-demo-client-ca", payload["headers"]["x_client_issuer"])
-        self.assertEqual(payload["user"]["id"], "user-alice")
-        self.assertEqual(payload["user"]["display_name"], "Alice Admin")
+        self.assertIsNone(payload["session_user"])
+        self.assertEqual(payload["certificate_user"]["id"], "user-alice")
+        self.assertEqual(payload["certificate_user"]["display_name"], "Alice Admin")
 
     def test_disabled_user_cannot_start_enrollment(self):
+        opener, _ = login_as("user-eve", self._https_context, next_path="/protected")
         with self.assertRaises(urllib.error.HTTPError) as context:
-            get_response(
-                "https://localhost:8443/enroll/start?user=user-eve",
-                context=self._https_context,
-            )
+            open_with_opener(opener, "https://localhost:8443/enroll/start")
         self.assertEqual(context.exception.code, 403)
         body = context.exception.read().decode("utf-8")
         context.exception.close()

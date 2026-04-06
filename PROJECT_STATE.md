@@ -94,10 +94,13 @@ What works today:
   - `/enroll` and `/signer/*` to `signer`
 - the app seeds demo users in a shared SQLite database and exposes a more
   realistic landing page at `/`
+- the app now creates a demo login session with an HTTP-only cookie and
+  protects `/protected` behind standard TLS login
 - the app creates persistent enrollment requests with short-lived random tokens
 - the enrollment trigger page emits the Firefox
-  `Client-Cert-Enrollment` header with a user-bound token, a CSR endpoint on
-  `8443`, and a completion URL on the mTLS listener at `9443`
+  `Client-Cert-Enrollment` header with a user-bound token for the logged-in
+  user, a CSR endpoint on `8443`, and a completion URL on the mTLS listener at
+  `9443`
 - the signer accepts a real PEM CSR at `POST /enroll`, validates the token
   against the shared database, ignores the CSR subject, and returns a PEM
   client certificate in JSON
@@ -109,14 +112,14 @@ What works today:
   metadata to the app on the mTLS listener, including the extracted certificate
   user identifier
 - the app resolves verified client certificates back to user records on mTLS
-  requests and surfaces that mapping in `/whoami` and `/enroll/complete`
+  requests and surfaces that mapping in `/whoami`, `/enroll/complete`, and the
+  protected mTLS page
 - all three services emit request logs to stdout
 - integration tests verify the baseline network behavior
 
 What does **not** exist yet:
 
 - certificate fingerprint forwarding
-- real browser login/session handling before enrollment
 - application-side authorization decisions that deny active mTLS sessions for
   disabled users after a certificate has already been issued
 
@@ -132,8 +135,11 @@ docker compose up --build -d
 Useful endpoints:
 
 - `https://127.0.0.1:8443/`
+- `https://127.0.0.1:8443/login`
+- `https://127.0.0.1:8443/protected`
 - `https://127.0.0.1:8443/whoami`
 - `https://localhost:9443/enroll/complete`
+- `https://localhost:9443/protected/mtls`
 - `https://localhost:9443/whoami`
 - `http://127.0.0.1:8080/` (redirects to HTTPS except health)
 - `http://127.0.0.1:8080/lb/healthz`
@@ -142,7 +148,7 @@ Example signer request:
 
 ```bash
 curl -X POST https://127.0.0.1:8443/enroll \
-  -H 'Authorization: Bearer <token-from-/enroll/start?user=user-alice>' \
+  -H 'Authorization: Bearer <token-from-/enroll/start-while-logged-in>' \
   -H 'Content-Type: application/pkcs10' \
   --data-binary $'-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n'
 ```
@@ -182,6 +188,7 @@ The test suite currently verifies:
 - LB health endpoint
 - HTTP redirect behavior at the LB
 - delivery of the app HTML page over HTTPS
+- login and the standard TLS protected page
 - delivery of the Firefox enrollment trigger page and header over HTTPS
 - creation of user-bound enrollment tokens
 - routing to the app diagnostics endpoint over HTTPS
@@ -189,6 +196,7 @@ The test suite currently verifies:
 - signer-side replacement of CSR identity with trusted user identity
 - rejection of unauthenticated traffic on the mTLS listener
 - delivery of the enrollment completion page over mTLS
+- delivery of the protected mTLS page with the connected user identity
 - forwarding of verified client identity headers over mTLS
 - application-side lookup of the user bound to the certificate
 - backend services are not reachable directly from host ports
@@ -216,8 +224,8 @@ repo code issue.
 The next implementation milestones should be:
 
 1. Add certificate fingerprint and full certificate forwarding where needed.
-2. Add real browser login or session state before issuing enrollment requests.
-3. Add application-side authorization behavior for disabled users with still-valid certs.
+2. Add application-side authorization behavior for disabled users with still-valid certs.
+3. Replace the demo user-picker login with a more realistic auth flow if needed.
 4. Add demo cases for:
    - valid cert + active user
    - valid cert + disabled user

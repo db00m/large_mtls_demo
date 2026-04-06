@@ -17,12 +17,15 @@ enrollment state.
 
 The app now exposes a browser-visible enrollment flow:
 
-- `/` serves demo users with active or disabled enrollment status
-- `/enroll/start?user=<user-id>` creates an enrollment request, generates a
-  short-lived token, and emits the Firefox `Client-Cert-Enrollment` header on
-  the bootstrap HTTPS listener at `8443`
+- `/login` creates a standard TLS application session for a demo user
+- `/protected` is a standard TLS protected page that requires login
+- `/enroll/start` creates an enrollment request for the logged-in user,
+  generates a short-lived token, and emits the Firefox
+  `Client-Cert-Enrollment` header on the bootstrap HTTPS listener at `8443`
 - `/enroll/complete` is the post-enrollment completion page served on the mTLS
   listener at `9443`
+- `/protected/mtls` is an mTLS-only protected page that shows the connected
+  certificate user
 - `POST /enroll` validates the token, ignores CSR identity claims, and returns
   a PEM certificate in JSON
 - all traffic on `9443` requires a client certificate signed by the demo client
@@ -72,6 +75,7 @@ The integration test will:
 - verify the LB health endpoint
 - verify HTTP requests redirect to HTTPS
 - verify the app serves a minimal HTML page through the LB over HTTPS
+- verify login and the standard TLS protected page
 - verify the enrollment trigger page emits the Firefox enrollment header
 - verify enrollment is tied to specific demo users
 - verify app diagnostics traffic routes through the LB over HTTPS
@@ -80,6 +84,7 @@ The integration test will:
 - verify the mTLS port rejects requests without a client certificate
 - verify the enrollment completion page is reachable with an enrolled client
   certificate
+- verify the mTLS protected page identifies the connected user
 - verify verified client identity headers and resolved user identity reach the
   app through the mTLS port
 - verify `app` and `signer` are not published to the host
