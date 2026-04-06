@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import ssl
 import subprocess
@@ -41,7 +42,7 @@ def run_compose(*args, check=True):
         raise AssertionError(
             "docker compose command failed: "
             f"{' '.join(args)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+        )
     return result
 
 
@@ -76,6 +77,20 @@ def create_client_key_and_csr(output_dir, common_name="firefox-demo-client"):
         f"/CN={common_name}",
     )
     return key_file, csr_file.read_bytes()
+
+
+def read_certificate_subject(cert_file):
+    result = run_command(
+        "openssl",
+        "x509",
+        "-in",
+        str(cert_file),
+        "-subject",
+        "-noout",
+        "-nameopt",
+        "RFC2253",
+    )
+    return result.stdout.strip().removeprefix("subject=")
 
 
 def ensure_local_tls_material():
@@ -160,6 +175,30 @@ def get_json(url, method="GET", body=None, headers=None, context=None):
         return json.loads(response.read().decode("utf-8"))
 
 
+def parse_enrollment_token(enrollment_header):
+    match = re.fullmatch(
+        r'https://localhost:8443/enroll; token="([^"]+)"; https://localhost:9443/enroll/complete',
+        enrollment_header,
+    )
+    if not match:
+        raise AssertionError(f"unexpected Client-Cert-Enrollment header: {enrollment_header}")
+    return match.group(1)
+
+
+def start_enrollment(user_id, context):
+    with get_response(
+        f"https://localhost:8443/enroll/start?user={user_id}",
+        context=context,
+    ) as response:
+        enrollment_header = response.headers.get("Client-Cert-Enrollment")
+        body = response.read().decode("utf-8")
+    return {
+        "token": parse_enrollment_token(enrollment_header),
+        "header": enrollment_header,
+        "body": body,
+    }
+
+
 @unittest.skipUnless(docker_available(), "docker is required for compose integration tests")
 class ComposeStackTests(unittest.TestCase):
     @classmethod
@@ -171,19 +210,27 @@ class ComposeStackTests(unittest.TestCase):
         cls._wait_for_stack()
         cls._client_tmp_dir = tempfile.TemporaryDirectory()
         client_dir = Path(cls._client_tmp_dir.name)
-        cls._client_key_file, client_csr = create_client_key_and_csr(client_dir)
-        enrollment_payload = get_json(
+        enrollment = start_enrollment("user-alice", cls._https_context)
+        cls._client_key_file, client_csr = create_client_key_and_csr(
+            client_dir,
+            common_name="csr-tries-to-be-mallory",
+        )
+        cls._initial_enrollment_payload = get_json(
             "https://127.0.0.1:8443/enroll",
             method="POST",
             body=client_csr,
             headers={
-                "Authorization": "Bearer demo-enrollment-token",
+                "Authorization": f"Bearer {enrollment['token']}",
                 "Content-Type": "application/pkcs10",
             },
             context=cls._https_context,
         )
         cls._client_cert_file = client_dir / "client.pem"
-        cls._client_cert_file.write_text(enrollment_payload["certificate"], encoding="utf-8")
+        cls._client_cert_file.write_text(
+            cls._initial_enrollment_payload["certificate"],
+            encoding="utf-8",
+        )
+        cls._client_cert_subject = read_certificate_subject(cls._client_cert_file)
         cls._mtls_context = client_https_context(cls._client_cert_file, cls._client_key_file)
 
     @classmethod
@@ -223,23 +270,19 @@ class ComposeStackTests(unittest.TestCase):
             self.assertEqual(response.headers.get_content_type(), "text/html")
             body = response.read().decode("utf-8")
         self.assertIn("Large mTLS Demo", body)
-        self.assertIn("HTTPS load balancer", body)
-        self.assertIn("Enroll Client Certificate", body)
-        self.assertIn('href="/enroll/start"', body)
+        self.assertIn("Demo Users", body)
+        self.assertIn("Alice Admin", body)
+        self.assertIn("Bob Builder", body)
+        self.assertIn("Eve Example", body)
+        self.assertIn('href="/enroll/start?user=user-alice"', body)
 
     def test_enrollment_trigger_page_emits_firefox_header(self):
-        with get_response("https://localhost:8443/enroll/start", context=self._https_context) as response:
-            self.assertEqual(response.headers.get_content_type(), "text/html")
-            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-            enrollment_header = response.headers.get("Client-Cert-Enrollment")
-            body = response.read().decode("utf-8")
-        self.assertEqual(
-            enrollment_header,
-            'https://localhost:8443/enroll; token="demo-enrollment-token"; '
-            'https://localhost:9443/enroll/complete',
-        )
-        self.assertIn("Client Certificate Enrollment", body)
-        self.assertIn("Continue to the completion page", body)
+        enrollment = start_enrollment("user-bob", self._https_context)
+        self.assertTrue(enrollment["token"])
+        self.assertIn("Bob Builder", enrollment["body"])
+        self.assertIn("user-bob", enrollment["body"])
+        self.assertIn("Client Certificate Enrollment", enrollment["body"])
+        self.assertIn("name", enrollment["body"])
 
     def test_app_diagnostics_route_through_lb_over_https(self):
         payload = get_json("https://127.0.0.1:8443/whoami", context=self._https_context)
@@ -247,28 +290,46 @@ class ComposeStackTests(unittest.TestCase):
         self.assertEqual(payload["headers"]["x_demo_trusted_proxy"], "lb")
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
         self.assertEqual(payload["headers"]["x_forwarded_host"], "127.0.0.1:8443")
+        self.assertIsNone(payload["headers"]["x_client_cert_user_id"])
+        self.assertIsNone(payload["user"])
 
     def test_signer_enroll_route_through_lb_over_https(self):
         client_dir = Path(self._client_tmp_dir.name)
-        _, body = create_client_key_and_csr(client_dir, common_name="firefox-demo-client-second")
+        enrollment = start_enrollment("user-bob", self._https_context)
+        _, body = create_client_key_and_csr(client_dir, common_name="mallory-requested-name")
         payload = get_json(
             "https://127.0.0.1:8443/enroll",
             method="POST",
             body=body,
             headers={
-                "Authorization": "Bearer demo-enrollment-token",
+                "Authorization": f"Bearer {enrollment['token']}",
                 "Content-Type": "application/pkcs10",
             },
             context=self._https_context,
         )
         self.assertEqual(payload["service"], "signer")
-        self.assertEqual(payload["headers"]["authorization"], "Bearer demo-enrollment-token")
+        self.assertEqual(payload["headers"]["authorization"], f"Bearer {enrollment['token']}")
         self.assertEqual(payload["headers"]["x_demo_trusted_proxy"], "lb")
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
         self.assertTrue(payload["csr_received"])
+        self.assertIn("CN=mallory-requested-name", payload["csr_subject"])
+        self.assertEqual(payload["name"], "Bob Builder")
+        self.assertEqual(payload["user"]["id"], "user-bob")
+        self.assertEqual(payload["certificate_identity"]["user_id"], "user-bob")
+        self.assertEqual(payload["certificate_identity"]["cert_identifier"], "user-bob")
+        self.assertEqual(
+            payload["certificate_identity"]["subject_alt_name_uri"],
+            "urn:large-mtls-demo:user:user-bob",
+        )
+        self.assertIn("/CN=Bob Builder/serialNumber=user-bob", payload["certificate_subject"])
         self.assertEqual(payload["encoding"], "pem")
         self.assertEqual(payload["redirect_url"], "https://localhost:9443/enroll/complete")
         self.assertIn("BEGIN CERTIFICATE", payload["certificate"])
+
+    def test_initial_certificate_subject_uses_trusted_user_identity(self):
+        self.assertIn("serialNumber=user-alice", self._client_cert_subject)
+        self.assertIn("CN=Alice Admin", self._client_cert_subject)
+        self.assertNotIn("csr-tries-to-be-mallory", self._client_cert_subject)
 
     def test_mtls_port_rejects_requests_without_client_certificate(self):
         try:
@@ -289,7 +350,8 @@ class ComposeStackTests(unittest.TestCase):
             self.assertEqual(response.headers.get_content_type(), "text/html")
             body = response.read().decode("utf-8")
         self.assertIn("Enrollment Completion", body)
-        self.assertIn("mTLS port", body)
+        self.assertIn("Alice Admin", body)
+        self.assertIn("user-alice", body)
 
     def test_mtls_whoami_shows_verified_client_identity(self):
         payload = get_json("https://localhost:9443/whoami", context=self._mtls_context)
@@ -298,8 +360,23 @@ class ComposeStackTests(unittest.TestCase):
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
         self.assertEqual(payload["headers"]["x_forwarded_host"], "localhost:9443")
         self.assertEqual(payload["headers"]["x_client_verify"], "SUCCESS")
-        self.assertIn("CN=firefox-demo-client", payload["headers"]["x_client_subject"])
+        self.assertEqual(payload["headers"]["x_client_cert_user_id"], "user-alice")
+        self.assertIn("serialNumber=user-alice", payload["headers"]["x_client_subject"])
+        self.assertIn("CN=Alice Admin", payload["headers"]["x_client_subject"])
         self.assertIn("CN=large-mtls-demo-client-ca", payload["headers"]["x_client_issuer"])
+        self.assertEqual(payload["user"]["id"], "user-alice")
+        self.assertEqual(payload["user"]["display_name"], "Alice Admin")
+
+    def test_disabled_user_cannot_start_enrollment(self):
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            get_response(
+                "https://localhost:8443/enroll/start?user=user-eve",
+                context=self._https_context,
+            )
+        self.assertEqual(context.exception.code, 403)
+        body = context.exception.read().decode("utf-8")
+        context.exception.close()
+        self.assertIn("not allowed to enroll", body)
 
     def test_backend_services_are_not_published_to_host(self):
         with self.assertRaises((urllib.error.URLError, ConnectionError, TimeoutError)):

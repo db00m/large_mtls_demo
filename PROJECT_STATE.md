@@ -92,25 +92,33 @@ What works today:
   - `/` and `/whoami` to `app`
   - `/enroll/start` and `/enroll/complete` to `app`
   - `/enroll` and `/signer/*` to `signer`
-- the app serves a minimal HTML landing page at `/`
-- the app exposes an enroll button and a top-level HTTPS enrollment trigger page
+- the app seeds demo users in a shared SQLite database and exposes a more
+  realistic landing page at `/`
+- the app creates persistent enrollment requests with short-lived random tokens
 - the enrollment trigger page emits the Firefox
-  `Client-Cert-Enrollment` header with a dummy token, a CSR endpoint on `8443`,
-  and a completion URL on the mTLS listener at `9443`
-- the signer accepts a real PEM CSR at `POST /enroll` and returns a PEM client
-  certificate in JSON
+  `Client-Cert-Enrollment` header with a user-bound token, a CSR endpoint on
+  `8443`, and a completion URL on the mTLS listener at `9443`
+- the signer accepts a real PEM CSR at `POST /enroll`, validates the token
+  against the shared database, ignores the CSR subject, and returns a PEM
+  client certificate in JSON
+- issued certificates now carry the trusted user display name in `CN` and the
+  stable app user identifier in `serialNumber`, plus a SAN URI with the same
+  identifier
 - the LB enforces client certificate verification on `9443`
 - the LB injects trusted-proxy headers and forwards certificate verification
-  metadata to the app on the mTLS listener
+  metadata to the app on the mTLS listener, including the extracted certificate
+  user identifier
+- the app resolves verified client certificates back to user records on mTLS
+  requests and surfaces that mapping in `/whoami` and `/enroll/complete`
 - all three services emit request logs to stdout
 - integration tests verify the baseline network behavior
 
 What does **not** exist yet:
 
-- real enrollment token flow
 - certificate fingerprint forwarding
-- user/session model in the application
-- application-side authorization decisions based on the verified certificate
+- real browser login/session handling before enrollment
+- application-side authorization decisions that deny active mTLS sessions for
+  disabled users after a certificate has already been issued
 
 ## How To Run
 
@@ -134,7 +142,7 @@ Example signer request:
 
 ```bash
 curl -X POST https://127.0.0.1:8443/enroll \
-  -H 'Authorization: Bearer test-token' \
+  -H 'Authorization: Bearer <token-from-/enroll/start?user=user-alice>' \
   -H 'Content-Type: application/pkcs10' \
   --data-binary $'-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n'
 ```
@@ -175,11 +183,14 @@ The test suite currently verifies:
 - HTTP redirect behavior at the LB
 - delivery of the app HTML page over HTTPS
 - delivery of the Firefox enrollment trigger page and header over HTTPS
+- creation of user-bound enrollment tokens
 - routing to the app diagnostics endpoint over HTTPS
 - routing to the signer enrollment endpoint over HTTPS
+- signer-side replacement of CSR identity with trusted user identity
 - rejection of unauthenticated traffic on the mTLS listener
 - delivery of the enrollment completion page over mTLS
 - forwarding of verified client identity headers over mTLS
+- application-side lookup of the user bound to the certificate
 - backend services are not reachable directly from host ports
 - LB can reach backend services on the internal Compose network
 
@@ -204,9 +215,9 @@ repo code issue.
 
 The next implementation milestones should be:
 
-1. Add enrollment token issuance and validation beyond the current dummy token.
-2. Add certificate fingerprint and full certificate forwarding where needed.
-3. Add application-side user lookup and authorization behavior.
+1. Add certificate fingerprint and full certificate forwarding where needed.
+2. Add real browser login or session state before issuing enrollment requests.
+3. Add application-side authorization behavior for disabled users with still-valid certs.
 4. Add demo cases for:
    - valid cert + active user
    - valid cert + disabled user

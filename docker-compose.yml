@@ -27,6 +27,10 @@ services:
       context: ./app
     expose:
       - "8000"
+    environment:
+      DEMO_DB_PATH: /srv/demo-data/demo.db
+    volumes:
+      - demo_data:/srv/demo-data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
       interval: 5s
@@ -40,7 +44,10 @@ services:
       context: ./signer
     expose:
       - "8000"
+    environment:
+      DEMO_DB_PATH: /srv/demo-data/demo.db
     volumes:
+      - demo_data:/srv/demo-data
       - signer_state:/srv/signer/state
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
@@ -55,4 +62,5 @@ networks:
     driver: bridge
 
 volumes:
+  demo_data:
   signer_state:
