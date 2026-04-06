@@ -2,6 +2,7 @@ import json
 import shutil
 import ssl
 import subprocess
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -52,6 +53,30 @@ def run_command(*args):
         text=True,
         check=True,
     )
+
+
+def generate_demo_csr():
+    if not openssl_available():
+        raise AssertionError("openssl is required to generate a demo CSR for enrollment tests")
+    with tempfile.TemporaryDirectory() as tmp_dir_name:
+        tmp_dir = Path(tmp_dir_name)
+        key_file = tmp_dir / "client.key"
+        csr_file = tmp_dir / "client.csr"
+        run_command(
+            "openssl",
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key_file),
+            "-out",
+            str(csr_file),
+            "-subj",
+            "/CN=firefox-demo-client",
+        )
+        return csr_file.read_bytes()
 
 
 def ensure_local_tls_material():
@@ -177,30 +202,60 @@ class ComposeStackTests(unittest.TestCase):
             body = response.read().decode("utf-8")
         self.assertIn("Large mTLS Demo", body)
         self.assertIn("HTTPS load balancer", body)
+        self.assertIn("Enroll Client Certificate", body)
+        self.assertIn('href="/enroll/start"', body)
+
+    def test_enrollment_trigger_page_emits_firefox_header(self):
+        with get_response("https://localhost:8443/enroll/start", context=self._https_context) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/html")
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            enrollment_header = response.headers.get("Client-Cert-Enrollment")
+            body = response.read().decode("utf-8")
+        self.assertEqual(
+            enrollment_header,
+            'https://localhost:8443/enroll; token="demo-enrollment-token"; '
+            'redirect="https://localhost:8443/enroll/complete"',
+        )
+        self.assertIn("Client Certificate Enrollment", body)
+        self.assertIn("Continue to the completion page", body)
 
     def test_app_diagnostics_route_through_lb_over_https(self):
         payload = get_json("https://127.0.0.1:8443/whoami", context=self._https_context)
         self.assertEqual(payload["service"], "app")
         self.assertEqual(payload["headers"]["x_demo_trusted_proxy"], "lb")
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
+        self.assertEqual(payload["headers"]["x_forwarded_host"], "127.0.0.1:8443")
 
     def test_signer_enroll_route_through_lb_over_https(self):
-        body = b"-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n"
+        body = generate_demo_csr()
         payload = get_json(
             "https://127.0.0.1:8443/enroll",
             method="POST",
             body=body,
             headers={
-                "Authorization": "Bearer test-token",
+                "Authorization": "Bearer demo-enrollment-token",
                 "Content-Type": "application/pkcs10",
             },
             context=self._https_context,
         )
         self.assertEqual(payload["service"], "signer")
-        self.assertEqual(payload["headers"]["authorization"], "Bearer test-token")
+        self.assertEqual(payload["headers"]["authorization"], "Bearer demo-enrollment-token")
         self.assertEqual(payload["headers"]["x_demo_trusted_proxy"], "lb")
         self.assertEqual(payload["headers"]["x_forwarded_proto"], "https")
         self.assertTrue(payload["csr_received"])
+        self.assertEqual(payload["encoding"], "pem")
+        self.assertEqual(payload["redirect_url"], "https://127.0.0.1:8443/enroll/complete")
+        self.assertIn("BEGIN CERTIFICATE", payload["certificate"])
+
+    def test_enrollment_completion_page_is_reachable(self):
+        with get_response(
+            "https://localhost:8443/enroll/complete?state=installed",
+            context=self._https_context,
+        ) as response:
+            self.assertEqual(response.headers.get_content_type(), "text/html")
+            body = response.read().decode("utf-8")
+        self.assertIn("Enrollment Completion", body)
+        self.assertIn("real redirect target", body)
 
     def test_backend_services_are_not_published_to_host(self):
         with self.assertRaises((urllib.error.URLError, ConnectionError, TimeoutError)):

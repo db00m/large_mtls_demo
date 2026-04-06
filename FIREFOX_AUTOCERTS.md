@@ -4,8 +4,14 @@
 The currently implemented trigger is a response header:
 
 ```http
-Client-Cert-Enrollment: https://example.com/enroll; token="opaque-one-time-token"
+Client-Cert-Enrollment: https://example.com/enroll; token="opaque-one-time-token"; https://example.com/enroll/complete
 ```
+
+Header fields are currently interpreted as:
+
+- the enrollment CSR endpoint URL
+- an optional `token="..."`
+- a bare completion URL for the browser to load after enrollment finishes
 
 Current enforced constraints:
 

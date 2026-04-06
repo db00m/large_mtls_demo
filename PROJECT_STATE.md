@@ -88,8 +88,14 @@ What works today:
   from `./certs`
 - the LB routes:
   - `/` and `/whoami` to `app`
+  - `/enroll/start` and `/enroll/complete` to `app`
   - `/enroll` and `/signer/*` to `signer`
 - the app serves a minimal HTML landing page at `/`
+- the app exposes an enroll button and a top-level HTTPS enrollment trigger page
+- the enrollment trigger page emits the Firefox
+  `Client-Cert-Enrollment` header with a dummy token and a real completion URL
+- the signer accepts a real PEM CSR at `POST /enroll` and returns a PEM client
+  certificate in JSON
 - the LB injects placeholder trusted-proxy headers
 - all three services emit request logs to stdout
 - integration tests verify the baseline network behavior
@@ -97,9 +103,7 @@ What works today:
 What does **not** exist yet:
 
 - client certificate validation
-- Firefox enrollment trigger page/header behavior
 - real enrollment token flow
-- real CSR parsing and signing
 - user/session model in the application
 - certificate-derived identity forwarding
 
@@ -163,8 +167,10 @@ The test suite currently verifies:
 - LB health endpoint
 - HTTP redirect behavior at the LB
 - delivery of the app HTML page over HTTPS
+- delivery of the Firefox enrollment trigger page and header over HTTPS
 - routing to the app diagnostics endpoint over HTTPS
 - routing to the signer enrollment endpoint over HTTPS
+- delivery of the enrollment completion page over HTTPS
 - backend services are not reachable directly from host ports
 - LB can reach backend services on the internal Compose network
 
@@ -189,13 +195,11 @@ repo code issue.
 
 The next implementation milestones should be:
 
-1. Emit the Firefox `Client-Cert-Enrollment` header from a page/response that
-   matches the documented constraints.
-2. Add enrollment token issuance in the app.
-3. Implement CSR acceptance and certificate signing in the signer.
-4. Add LB forwarding of real certificate-derived identity headers.
-5. Add application-side user lookup and authorization behavior.
-6. Add demo cases for:
+1. Add enrollment token issuance and validation beyond the current dummy token.
+2. Add LB client certificate validation against the signer CA.
+3. Add LB forwarding of real certificate-derived identity headers.
+4. Add application-side user lookup and authorization behavior.
+5. Add demo cases for:
    - valid cert + active user
    - valid cert + disabled user
    - invalid/untrusted cert

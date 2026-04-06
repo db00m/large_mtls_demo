@@ -6,11 +6,19 @@ This repository contains the first scaffold for a browser-to-edge mTLS demo.
 
 - `lb`: NGINX reverse proxy on `https://localhost:8443`
 - `app`: minimal Python HTTP service
-- `signer`: minimal Python HTTP service
+- `signer`: Python HTTP service that signs demo client CSRs
 
 The stack now terminates TLS at the load balancer with local development
 certificates. Backend traffic remains plain HTTP on the internal Compose
 network.
+
+The app now exposes a browser-visible enrollment flow:
+
+- `/` serves an enroll button
+- `/enroll/start` emits the Firefox `Client-Cert-Enrollment` header on a
+  top-level HTTPS page
+- `/enroll/complete` is the post-enrollment completion page
+- `POST /enroll` signs a real CSR and returns a PEM certificate in JSON
 
 ## Run
 
@@ -43,7 +51,9 @@ The integration test will:
 - verify the LB health endpoint
 - verify HTTP requests redirect to HTTPS
 - verify the app serves a minimal HTML page through the LB over HTTPS
+- verify the enrollment trigger page emits the Firefox enrollment header
 - verify app diagnostics traffic routes through the LB over HTTPS
 - verify `/enroll` reaches the signer through the LB over HTTPS
+- verify the enrollment completion page is reachable
 - verify `app` and `signer` are not published to the host
 - verify internal service-to-service networking on the compose network

@@ -1,10 +1,16 @@
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 
 class AppHandler(BaseHTTPRequestHandler):
+    ENROLLMENT_TOKEN = "demo-enrollment-token"
+    ENROLLMENT_COMPLETE_URL = "https://localhost:8443/enroll/complete"
+
     def _log_request(self, status_code):
+        if urlsplit(self.path).path == "/healthz":
+            return
         sys.stdout.write(
             "[app] "
             f"client={self.client_address[0]} "
@@ -35,12 +41,53 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
         self._log_request(status_code)
 
+    def _external_base_url(self):
+        scheme = self.headers.get("X-Forwarded-Proto", "http")
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host", "localhost")
+        return f"{scheme}://{host}"
+
+    def _send_enrollment_page(self):
+        base_url = self._external_base_url()
+        csr_url = f"{base_url}/enroll"
+        complete_url = self.ENROLLMENT_COMPLETE_URL
+        enrollment_header = f'{csr_url}; token="{self.ENROLLMENT_TOKEN}"; {complete_url}'
+        body = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enroll Client Certificate</title>
+    <meta http-equiv="refresh" content="3; url={complete_url}">
+  </head>
+  <body>
+    <main>
+      <h1>Client Certificate Enrollment</h1>
+      <p>This top-level HTTPS page emits the Firefox <code>Client-Cert-Enrollment</code> header.</p>
+      <p>If Firefox auto enrollment is enabled, the browser should now generate a CSR and <code>POST</code> it to <code>{csr_url}</code>.</p>
+      <p>You will be redirected to the completion page shortly.</p>
+      <p><a href="{complete_url}">Continue to the completion page</a></p>
+    </main>
+  </body>
+</html>
+"""
+        encoded = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Client-Cert-Enrollment", enrollment_header)
+        self.end_headers()
+        self.wfile.write(encoded)
+        self._log_request(200)
+
     def do_GET(self):
-        if self.path == "/healthz":
+        request_path = urlsplit(self.path).path
+
+        if request_path == "/healthz":
             self._send_json(200, {"service": "app", "status": "ok"})
             return
 
-        if self.path == "/":
+        if request_path == "/":
             self._send_html(
                 200,
                 """<!doctype html>
@@ -54,8 +101,11 @@ class AppHandler(BaseHTTPRequestHandler):
     <main>
       <h1>Large mTLS Demo</h1>
       <p>This app is reachable through the HTTPS load balancer.</p>
-      <p>Current phase: local TLS termination is active, but client certificate enrollment is not implemented yet.</p>
+      <p>Current phase: Firefox enrollment scaffolding is active and the signer now returns a demo client certificate.</p>
+      <p><a href="/enroll/start">Enroll Client Certificate</a></p>
       <ul>
+        <li><a href="/enroll/start">Trigger Firefox auto enrollment</a></li>
+        <li><a href="/enroll/complete">Enrollment completion page</a></li>
         <li><a href="/whoami">Inspect forwarded headers</a></li>
         <li><code>POST /enroll</code> is routed to the signer service through the load balancer.</li>
       </ul>
@@ -66,10 +116,37 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if self.path == "/whoami":
+        if request_path == "/enroll/start":
+            self._send_enrollment_page()
+            return
+
+        if request_path == "/enroll/complete":
+            self._send_html(
+                200,
+                """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enrollment Complete</title>
+  </head>
+  <body>
+    <main>
+      <h1>Enrollment Completion</h1>
+      <p>This is the real redirect target for the enrollment flow.</p>
+      <p>If Firefox accepted the certificate response, the browser should now have a client certificate available for later mTLS handshakes.</p>
+      <p><a href="/">Return to the demo home page</a></p>
+    </main>
+  </body>
+</html>
+""",
+            )
+            return
+
+        if request_path == "/whoami":
             payload = {
                 "service": "app",
-                "path": self.path,
+                "path": request_path,
                 "headers": {
                     "host": self.headers.get("Host"),
                     "x_demo_trusted_proxy": self.headers.get("X-Demo-Trusted-Proxy"),
